@@ -1,0 +1,32 @@
+mes_elus/
+│
+├── __init__.py
+├── metadata.txt
+├── icon.png
+├── main_plugin.py
+├── resources.qrc
+├── resources_rc.py
+├── i18n/
+│   └── fr/
+│       └── LC_MESSAGES/
+│           └── mes_elus.qm
+├── lib/
+│   ├── download_rne.py
+│   ├── process_rne_geo.py
+│   ├── generate_default_qml.py
+│   ├── apply_styles.py
+│   ├── select_perimeter.py
+│   └── utils.py
+├── syles/
+│   ├── conseillers-communautaires-epci.qml
+│   ├── conseillers-departementaux-cd.qml
+│   ├── conseillers-municipaux-cm.qml
+│   ├── conseillers-regionaux-cr.qml
+│   ├── deputes-dep.qml
+│   ├── maires-mai.qml
+│   ├── Président_Conseil_Départemental.qml
+│   ├── Président_Conseil_Régional.qml
+│   ├── President_epci.qml
+│   ├── senateurs-sen.qml
+└── test/
+    └── test_plugin.py

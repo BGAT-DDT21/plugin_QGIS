@@ -1,0 +1,21 @@
+[general]
+name=mes_elus
+description=Plugin pour télécharger et géoréférencer les données du RNE.
+version=2.0.1
+qgisMinimumVersion=3.0
+author=Xavier FAYOUX
+email=xavier.fayoux@cote-dor.gouv.fr
+repository=https://gitlab-forge.din.developpement-durable.gouv.fr/xavier.fayoux/plugin-mes_elus
+icon=icon.png
+about=Plugin pour automatiser le téléchargement et le traitement des données du RNE
+
+# Optional items:
+
+changelog=  2.0.1 Prise en compte éventuelle d'un proxy
+ 1.0.2 ajout des fonctions d'export en gpkg.
+ 1.0.1 correction des couches de "Président" d'EPCI, de région, de département 
+ 0.1 Première version fonctionnelle
+
+# tags are comma separated with spaces allowed
+tags= RNE, élus
+
