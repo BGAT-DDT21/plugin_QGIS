@@ -1,2 +1,2 @@
-# plugin_Mes_élus
+# plugins QGIS
 Plugin QGIS développés par le BGAT
