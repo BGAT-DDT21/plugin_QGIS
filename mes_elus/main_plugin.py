@@ -15,9 +15,11 @@ from qgis.core import Qgis, QgsMessageLog, QgsProject
 
 from .lib.download_rne import download_and_filter
 from .lib.process_rne_geo import process_geo
+from .lib.geom_paths import GeomPathsTab
 from .lib.select_perimeter import select_perimeter_dialog
 from qgis.utils import pluginDirectory
 from .lib.apply_styles import apply_all_styles
+from .lib.utils import info, warning
 
 
 logo_label = QLabel()
@@ -114,6 +116,11 @@ class MesElusPlugin:
         layout.addStretch()
         tab.setLayout(layout)
         return tab
+        
+    def create_tab_geom_paths(self):
+        """Crée l'onglet pour afficher les chemins des couches géométriques."""
+        tab = GeomPathsTab()
+        return tab
 
     def create_tab_traitement(self):
         tab = QWidget()
@@ -129,8 +136,8 @@ class MesElusPlugin:
         text.setHtml("""
         <br><br>  <!-- Saut de 2 lignes -->
         <p>
-        <span style="color:red; font-weight:bold; font-size:30pt;">⚠️ Attention : </span>
-        <span style="color:red; font-weight:bold; font-size:20pt;">
+        <span style="color:red; font-weight:bold; font-size:20pt;">⚠️ Attention : </span>
+        <span style="color:red; font-weight:bold; font-size:12pt;">
         Lors de la première utilisation du plugin, il est nécessaire d'identifier les couches qui seront utilisées pour le géocodage. Cette étape peut sembler longue, mais une fois les associations effectuées, les prochaines géolocalisations seront beaucoup plus rapides.
         </span></p>
         """)
@@ -240,6 +247,7 @@ class MesElusPlugin:
 
             tab_widget.addTab(self.create_tab_accueil(), "Accueil")
             tab_widget.addTab(self.create_tab_telechargement(), "Téléchargement")
+            tab_widget.addTab(self.create_tab_geom_paths(), "Chemin géométries")
             tab_widget.addTab(self.create_tab_traitement(), "Création des couches")
             tab_widget.addTab(self.create_tab_styles(), "Mise en forme")
             tab_widget.addTab(self.create_tab_export(), "Export")
