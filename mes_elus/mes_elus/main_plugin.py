@@ -6,18 +6,20 @@ import json
 import pandas as pd
 
 from qgis.PyQt.QtWidgets import (
-    QAction, QDialog, QTabWidget, QWidget, QVBoxLayout, QListWidget, QComboBox, QListWidgetItem,
-    QLabel, QPushButton, QTextEdit, QSizePolicy, QFileDialog, QMessageBox, QHBoxLayout, QScrollArea
+    QAction, QCheckBox,QDialog, QDialogButtonBox, QTabWidget, QWidget, QVBoxLayout, QListWidget, QComboBox, QListWidgetItem,
+    QLabel, QLineEdit, QPushButton, QTextEdit, QSizePolicy, QFileDialog, QMessageBox, QHBoxLayout, QScrollArea
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QSettings
 from qgis.PyQt.QtGui import (QIcon,QPixmap)
 from qgis.core import Qgis, QgsMessageLog, QgsProject
+from qgis.utils import pluginDirectory
 
 from .lib.download_rne import download_and_filter
 from .lib.process_rne_geo import process_geo
-from .lib.select_perimeter import select_perimeter_dialog
-from qgis.utils import pluginDirectory
+from .lib.geom_paths import GeomPathsTab
+from .lib.select_perimeter import select_perimeter_dialog, DEPARTEMENTS, REGIONS
 from .lib.apply_styles import apply_all_styles
+from .lib.utils import info, warning
 
 
 logo_label = QLabel()
@@ -70,9 +72,6 @@ class MesElusPlugin:
         text.setReadOnly(True)
         text.setMinimumHeight(400)          # ← hauteur fixe suffisante
         text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        text.setHtml(""" ... ton html ... """)
-        layout.addWidget(text)
-        text.setReadOnly(True)
         text.setHtml("""
         <h1 style="color:#d4380d">Mes Élus</h1>
         <p>Plugin complet pour charger, géocoder et mettre en forme <b>les données du Répertoire National des Élus (RNE)</b> de votre département ou région.</p>
@@ -81,29 +80,77 @@ class MesElusPlugin:
             <li> Étape 1 : Téléchargement filtré du RNE (seulement votre territoire)</li>
             <li> Étape 2 : Géocodage automatique (attribution des géométries des territoires d'exercice des mandats des types d'élus sélectionnés)</li>
             <li> Étape 3 : Mise en forme en 1 clic avec Groupe thématique + zoom automatique</li>
-            <li> Étape 4 : Export en gpkg des couches crées avec leur mise en forme </li>
-            <li>Compatible RNE 2025</li>
+            <li> Étape 4 : Export en gpkg des couches créées avec leur mise en forme </li>
+            <li>Compatible RNE 2026</li>
         </ul>
-        <h3>Étape préliminaire indispensable – Sélectionner le dossier de travail</h3>
-        <p>Toutes les données seront enregistrées dans ce dossier (CSV filtrés, etc.) :</p>
         """)
         layout.addWidget(text)
+        tab.setLayout(layout)
+        
+        return tab
 
-        # Dossier + bouton    
-        hbox = QHBoxLayout()
+
+
+    def create_tab_configuration(self):
+        tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+
+        # --- 1. Répertoire de travail ---
+        hbox_dossier = QHBoxLayout()
         self.lbl_dossier = QLabel("Aucun dossier sélectionné")
-        self.lbl_dossier.setStyleSheet("QLabel { padding: 10px; background:#f0f0f0; border-radius:5px; font-size:11pt; }")
-        hbox.addWidget(self.lbl_dossier)
+        self.lbl_dossier.setStyleSheet("QLabel { padding: 10px; background:#f0f0f0; border-radius:5px; }")
+        hbox_dossier.addWidget(self.lbl_dossier)
 
-        btn = QPushButton("Choisir le dossier de travail")
-        btn.clicked.connect(self.select_output_directory)
-        hbox.addWidget(btn)
-        layout.addLayout(hbox)
+        # Bouton pour choisir le dossier
+        btn_dossier = QPushButton("Choisir le dossier de travail")
+        btn_dossier.clicked.connect(self.select_output_directory)
+        hbox_dossier.addWidget(btn_dossier)
+
+        # Ajouter une description sous le bouton
+        description_label = QLabel("Les données du RNE y seront téléchargées")
+        description_label.setStyleSheet("color: #555; font-style: italic;")
+        layout.addLayout(hbox_dossier)
+        layout.addWidget(description_label)  # Ajoute le texte sous le bouton
+
+        # --- 2. Chemins des géométries ---
+        self.geom_paths_tab = GeomPathsTab()  # Réutilisation de la classe existante
+        layout.addWidget(QLabel("<h3>Chemins des couches géométriques</h3>"))
+        layout.addWidget(self.geom_paths_tab)
+
+        # --- 3. Configuration du proxy ---
+        layout.addWidget(QLabel("<h3>Configuration du proxy</h3>"))
+
+        hbox_proxy = QHBoxLayout()
+        self.proxy_checkbox = QCheckBox("Utiliser un proxy")
+        self.proxy_checkbox.stateChanged.connect(self.toggle_proxy)
+        hbox_proxy.addWidget(self.proxy_checkbox)
+
+        self.proxy_input = QLineEdit()
+        self.proxy_input.setPlaceholderText("http://monproxy:8080")
+        self.proxy_input.setEnabled(False)
+        hbox_proxy.addWidget(self.proxy_input)
+
+        btn_save_proxy = QPushButton("Enregistrer")
+        btn_save_proxy.clicked.connect(self.save_proxy_config)
+        hbox_proxy.addWidget(btn_save_proxy)
+        layout.addLayout(hbox_proxy)
+        
+         # --- 4. Bouton de réinitialisation ---
+        btn_reset = QPushButton("Réinitialiser les paramètres")
+        btn_reset.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
+        btn_reset.clicked.connect(self.reset_settings)
+        layout.addWidget(btn_reset)
+
+        # Charger la configuration actuelle du proxy
+        self.load_proxy_config()
 
         layout.addStretch()
         tab.setLayout(layout)
         return tab
 
+    
+    
     def create_tab_telechargement(self):
         tab = QWidget()
         layout = QVBoxLayout()
@@ -114,7 +161,7 @@ class MesElusPlugin:
         layout.addStretch()
         tab.setLayout(layout)
         return tab
-
+        
     def create_tab_traitement(self):
         tab = QWidget()
         layout = QVBoxLayout()
@@ -124,18 +171,6 @@ class MesElusPlugin:
         layout.addWidget(btn)
         layout.addStretch()  # Ajout des parenthèses
 
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setHtml("""
-        <br><br>  <!-- Saut de 2 lignes -->
-        <p>
-        <span style="color:red; font-weight:bold; font-size:30pt;">⚠️ Attention : </span>
-        <span style="color:red; font-weight:bold; font-size:20pt;">
-        Lors de la première utilisation du plugin, il est nécessaire d'identifier les couches qui seront utilisées pour le géocodage. Cette étape peut sembler longue, mais une fois les associations effectuées, les prochaines géolocalisations seront beaucoup plus rapides.
-        </span></p>
-        """)
-        
-        layout.addWidget(text)
         tab.setLayout(layout)
         
         return tab
@@ -155,7 +190,7 @@ class MesElusPlugin:
             <li>Conseillers départementaux → délimitation en bleu des cantons + étiquette </li>
             <li>Conseillers communautaires → vert EPCI</li>
             <li>Conseillers municipaux → point gris discret</li>
-            <li>Conseillers régionaux → polygone région</li>
+            <li>Conseillers régionaux → polygone département</li>
         </ul>
         <p><b>Groupe créé + zoom automatique</b></p>
         """)
@@ -170,7 +205,7 @@ class MesElusPlugin:
             QPushButton {
                 font-size: 18pt;
                 padding: 20px;
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff8c10, stop:1 #dc3545);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0077B6, stop:1 #003366);
                 color: white;
                 font-weight: bold;
                 border-radius: 15px;
@@ -237,8 +272,8 @@ class MesElusPlugin:
             self.dialog.setMinimumSize(850, 600)
 
             tab_widget = QTabWidget()
-
             tab_widget.addTab(self.create_tab_accueil(), "Accueil")
+            tab_widget.addTab(self.create_tab_configuration(), "Configuration")  # Nouvel onglet
             tab_widget.addTab(self.create_tab_telechargement(), "Téléchargement")
             tab_widget.addTab(self.create_tab_traitement(), "Création des couches")
             tab_widget.addTab(self.create_tab_styles(), "Mise en forme")
@@ -247,9 +282,63 @@ class MesElusPlugin:
             layout = QVBoxLayout()
             layout.addWidget(tab_widget)
             self.dialog.setLayout(layout)
+            
+            # Charger le chemin du dossier de travail
+            self.load_output_dir()
 
         self.dialog.show()
         self.dialog.raise_()
+
+
+    # ==================================================================
+    # CONFIGURATION
+    # ==================================================================
+
+    def toggle_proxy(self, state):
+        """Active/désactive le champ de saisie du proxy."""
+        self.proxy_input.setEnabled(state == Qt.Checked)
+
+    def load_proxy_config(self):
+        """Charge la configuration du proxy depuis QSettings."""
+        settings = QSettings("MesElusPlugin", "Proxy")
+        proxy_url = settings.value("proxy_url", "")
+        use_proxy = settings.value("use_proxy", False, type=bool)
+        self.proxy_checkbox.setChecked(use_proxy)
+        self.proxy_input.setText(proxy_url)
+        self.proxy_input.setEnabled(use_proxy)
+
+    def save_proxy_config(self):
+        """Enregistre la configuration du proxy dans QSettings."""
+        settings = QSettings("MesElusPlugin", "Proxy")
+        settings.setValue("use_proxy", self.proxy_checkbox.isChecked())
+        settings.setValue("proxy_url", self.proxy_input.text())
+        QMessageBox.information(self.iface.mainWindow(), "Succès", "Configuration du proxy enregistrée.")
+
+    def reset_settings(self):
+        """Réinitialise les paramètres sauvegardés dans QSettings (proxy et chemins des couches)."""
+        # Réinitialiser la configuration du proxy
+        settings_proxy = QSettings("MesElusPlugin", "Proxy")
+        settings_proxy.remove("use_proxy")
+        settings_proxy.remove("proxy_url")
+
+        # Réinitialiser les chemins des couches géométriques
+        settings_geom = QSettings("MesElusPlugin", "Fonds")
+        layer_types = ["communes", "cantons", "departements", "regions", "epci", "circonscriptions"]
+        for layer_type in layer_types:
+            settings_geom.remove(f"{layer_type}_path")
+            settings_geom.remove(f"{layer_type}_field")
+
+        # Afficher un message de confirmation
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Réinitialisation terminée",
+            "Tous les paramètres (proxy et chemins des couches) ont été réinitialisés."
+        )
+
+        # Rafraîchir l'affichage
+        self.load_proxy_config()
+        self.geom_paths_tab.update_table()
+
 
     # ==================================================================
     # SÉLECTION DOSSIER DE TRAVAIL
@@ -272,14 +361,18 @@ class MesElusPlugin:
     # ==================================================================
     def run_download(self):
         if not self.output_dir:
-            warning(self.iface.mainWindow(), "Attention", "Sélectionnez d'abord un dossier de travail dans l'onglet Accueil.")
+            warning(self.iface.mainWindow(), "Attention", "Sélectionnez d'abord un dossier de travail.")
             return
+
+        # Récupérer la configuration du proxy
+        settings = QSettings("MesElusPlugin", "Proxy")
+        proxy_url = settings.value("proxy_url", "") if settings.value("use_proxy", False, type=bool) else None
+
         rne_data_dir = os.path.join(self.output_dir, "rne_data")
         filtered_data_dir = os.path.join(rne_data_dir, "filtered")
         territory_type, selected_code = select_perimeter_dialog(self.iface.mainWindow())
+
         if territory_type:
-            # Stocker le territoire sélectionné dans un fichier JSON
-            from .lib.select_perimeter import DEPARTEMENTS, REGIONS
             territory_name = DEPARTEMENTS.get(selected_code) if territory_type == "Département" else REGIONS.get(selected_code)
             territory_info = {
                 "territory_type": territory_type,
@@ -289,8 +382,20 @@ class MesElusPlugin:
             }
             with open(os.path.join(self.output_dir, "selected_territory.json"), "w") as f:
                 json.dump(territory_info, f)
-            download_and_filter(rne_data_dir, filtered_data_dir, territory_type, selected_code, self.iface.mainWindow())   
-        
+
+            download_and_filter(rne_data_dir, filtered_data_dir, territory_type, selected_code, self.iface.mainWindow())
+
+
+    def load_output_dir(self):
+        """Charge le chemin du dossier de travail depuis QSettings."""
+        settings = QSettings("MesElusPlugin", "Settings")
+        dir_path = settings.value("output_dir", None)
+        if dir_path and os.path.exists(dir_path):
+            self.output_dir = dir_path
+            if self.lbl_dossier:
+                self.lbl_dossier.setText(f"<b>Dossier de travail :</b> {dir_path}")
+
+    
     def run_processing(self):
         if not self.output_dir:
             warning(self.iface.mainWindow(), "Attention", "Sélectionnez d'abord un dossier de travail.")
@@ -343,7 +448,6 @@ class MesElusPlugin:
             )
 
 
-
     def select_output_directory(self):
         dir_path = QFileDialog.getExistingDirectory(
             self.iface.mainWindow(),
@@ -354,6 +458,11 @@ class MesElusPlugin:
             self.output_dir = dir_path
             if self.lbl_dossier:  # <-- Vérifie que self.lbl_dossier existe
                 self.lbl_dossier.setText(f"<b>Dossier de travail :</b> {dir_path}")
+            
+            # Enregistrer le chemin dans QSettings
+            settings = QSettings("MesElusPlugin", "Settings")
+            settings.setValue("output_dir", dir_path)
+            
             self.iface.messageBar().pushMessage("Mes Élus", f"Dossier de travail sélectionné : {dir_path}", level=Qgis.Info)
             # Crée le sous-dossier "rne_data" s'il n'existe pas
             rne_data_dir = os.path.join(self.output_dir, "rne_data")
