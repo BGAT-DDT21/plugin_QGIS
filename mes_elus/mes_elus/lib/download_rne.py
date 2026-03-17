@@ -196,6 +196,10 @@ def download_and_filter(rne_data_dir, filtered_data_dir, territory_type, selecte
     settings = QSettings("MesElusPlugin", "Proxy")
     use_proxy = settings.value("use_proxy", False, type=bool)
     proxy_url = settings.value("proxy_url", "")
+    
+     # Créer les dossiers s'ils n'existent pas
+    os.makedirs(rne_data_dir, exist_ok=True)
+    os.makedirs(filtered_data_dir, exist_ok=True)  # Assurez-vous que ce dossier existe
 
     # Si le proxy est requis et non configuré, afficher un message d'erreur
     if not proxy_url and use_proxy:

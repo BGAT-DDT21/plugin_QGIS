@@ -2,7 +2,7 @@
 name=mes_elus
 description=Plugin pour télécharger et géoréférencer les données du RNE.
 about=Plugin to automate the download and processing of data from the French National Directory of Elected Officials (Référentiel National des Élus)
-version=3.0.1
+version=3.0.2
 qgisMinimumVersion=3.4
 author=Xavier FAYOUX
 email=ddt-mpit-adl@cote-dor.gouv.fr
@@ -14,7 +14,8 @@ repository=https://github.com/BGAT-DDT21/plugin_QGIS/tree/main/mes_elus
 
 # Optional items:
 
-changelog= 3.0.1 Ajout d'un onglet configuration
+changelog= 3.0.2. Correction bug "dossier d'enregistrement"
+ 3.0.1 Ajout d'un onglet configuration
  2.0.3 Amélioration de la gestion des couches des géométries
  2.0.2  Ajout de la description en anglais 
  2.0.1 Prise en compte éventuelle d'un proxy
