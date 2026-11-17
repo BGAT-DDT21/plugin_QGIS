@@ -1,46 +1,49 @@
 # -*- coding: utf-8 -*-
 # lib/process_rne_geo.py
-# Testé et validé le 24/11/2025
+# Création de couches géographiques à partir des CSV filtrés du RNE
+# Version stabilisée – jointures sans chargement préalable dans le projet
+# 11/09/2026
 
 import os
 import geopandas as gpd
 import pandas as pd
 from qgis.PyQt.QtWidgets import (
-    QProgressDialog, QFileDialog, QDialog, QVBoxLayout,
-    QCheckBox, QDialogButtonBox, QLabel, QMessageBox, QComboBox
+    QProgressDialog, QDialog, QVBoxLayout,
+    QCheckBox, QDialogButtonBox, QLabel, QMessageBox
 )
-from qgis.PyQt.QtCore import QSettings, QVariant
+from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
-    QgsVectorLayer, QgsFeature, QgsGeometry, QgsField,
-    QgsProject
+    QgsVectorLayer, QgsFeature, QgsGeometry, QgsField, QgsProject
 )
+
+# Import de la fonction de récupération des chemins
+try:
+    from .geom_paths import get_geom_paths
+except ImportError:
+    from geom_paths import get_geom_paths
+
+
+# ---------------------------------------------------------------------------
+# Gestion des messages utilisateur
+# ---------------------------------------------------------------------------
 try:
     from .utils import info, warning
-except:
-    info = lambda p, t, m: QMessageBox.information(p, t, m)
-    warning = lambda p, t, m: QMessageBox.warning(p, t, m)
+except ImportError:
+    def info(parent, title, message):
+        QMessageBox.information(parent, title, message)
 
-# ===================== LOG =====================
-import tempfile
-log_path = os.path.join(tempfile.gettempdir(), "debug_meselus_geo.log")
-log_file = open(log_path, "a", encoding="utf-8")
+    def warning(parent, title, message):
+        QMessageBox.warning(parent, title, message)
 
-def log(msg):
-    print("[MesElus GEO] " + msg)
-    log_file.write(msg + "\n")
-    log_file.flush()
 
-log("\n" + "="*70)
-log("NOUVELLE SESSION – " + pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
-log("="*70)
-
-# ------------------------------------------------------------------
-# Agrégation intelligente avec ordre de fonction (maire → adjoint → conseiller)
-# ------------------------------------------------------------------
+# ===========================================================================
+# FONCTION D'AGRÉGATION INTELLIGENTE DES ÉLUS
+# ===========================================================================
 def aggregate_elus(df, group_var, geo_cols, elus_cols):
-    log(f"   Agrégation intelligente sur {group_var} → {len(df)} lignes avant")
-
-    # 1. On crée une colonne temporaire d'ordre de priorité
+    """
+    Agrège les élus par entité géographique en respectant un ordre de priorité
+    des fonctions (maire > adjoint > conseiller > autres).
+    """
     def priorite_fonction(row):
         fonc = str(row.get('Libellé de la fonction', '')).lower()
         if 'maire' in fonc:
@@ -50,17 +53,18 @@ def aggregate_elus(df, group_var, geo_cols, elus_cols):
         elif 'conseiller' in fonc or 'délégué' in fonc:
             return 2
         else:
-            return 99  # autres (président EPCI, etc.)
+            return 99
 
+    df = df.copy()
     df['__prio'] = df.apply(priorite_fonction, axis=1)
-    df['__nom_complet'] = df['Nom de l\'élu'].fillna('') + ' ' + df['Prénom de l\'élu'].fillna('')
-
-    # 2. Tri par priorité + nom
+    df['__nom_complet'] = (
+        df['Nom de l\'élu'].fillna('') + ' ' + df['Prénom de l\'élu'].fillna('')
+    )
     df = df.sort_values(['__prio', '__nom_complet'])
 
-    # 3. Agrégation en conservant l'ordre
     grouped_dict = {}
     geometries = {}
+
     for name, group in df.groupby(group_var):
         row = {group_var: name}
         for col in df.columns:
@@ -71,305 +75,312 @@ def aggregate_elus(df, group_var, geo_cols, elus_cols):
         grouped_dict[name] = row
         geometries[name] = group['geometry'].iloc[0]
 
-    # Créer un DataFrame à partir du résultat agrégé
     grouped_df = pd.DataFrame(grouped_dict.values())
-
-    # Créer un GeoDataFrame avec la colonne de géométrie
-    grouped_gdf = gpd.GeoDataFrame(grouped_df, geometry=list(geometries.values()), crs=df.crs)
-
-    log(f"   → {len(grouped_gdf)} entités après agrégation intelligente")
+    grouped_gdf = gpd.GeoDataFrame(
+        grouped_df,
+        geometry=list(geometries.values()),
+        crs=df.crs
+    )
     return grouped_gdf
 
 
-# ------------------------------------------------------------------
+# ===========================================================================
+# DIALOGUE DE SÉLECTION DES MANDATS À TRAITER
+# ===========================================================================
 def select_types_to_process(csv_files, parent=None):
-    types = {f: f.replace("filtered_", "").replace(".csv", "").replace("-", " ").title() for f in csv_files}
+    """
+    Affiche une boîte de dialogue permettant de cocher les mandats à traiter.
+    """
+    types = {
+        f: f.replace("filtered_", "").replace(".csv", "").replace("-", " ").title()
+        for f in csv_files
+    }
+
     dialog = QDialog(parent)
     dialog.setWindowTitle("Choisir les mandats à traiter")
     layout = QVBoxLayout()
     layout.addWidget(QLabel("Sélectionnez les mandats à ajouter au projet QGIS :"))
+
     checkboxes = {}
     for file, label in types.items():
         cb = QCheckBox(label)
         cb.setChecked(True)
         checkboxes[file] = cb
         layout.addWidget(cb)
+
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
+
     dialog.setLayout(layout)
     dialog.resize(500, 400)
+
     if dialog.exec_() != QDialog.Accepted:
         return None
+
     selected = [f for f, cb in checkboxes.items() if cb.isChecked()]
+
     if not selected:
         warning(parent, "Aucun mandat", "Sélectionnez au moins un mandat.")
         return None
-    log(f"Mandats sélectionnés : {selected}")
+
     return selected
 
-# ------------------------------------------------------------------
-def load_fond(layer_type, id_name, parent=None):
-    settings = QSettings("MesElusPlugin", "Fonds")
-    path = settings.value(layer_type + "_path", None)
-    field = settings.value(layer_type + "_field", None)
-    if path and os.path.exists(path) and field:
-        try:
-            gdf = gpd.read_file(path)
-            gdf = gdf.rename(columns={field: id_name})
-            log(f"Chargement mémorisé {layer_type} → {len(gdf)} entités")
-            return gdf[[id_name, 'geometry']]
-        except Exception as e:
-            log(f"Échec fond mémorisé {layer_type} : {e}")
-    path, _ = QFileDialog.getOpenFileName(parent, f"Couche {layer_type}", "", "Fichiers géo (*.gpkg *.shp *.geojson)")
-    if not path:
-        return None
-    try:
-        gdf = gpd.read_file(path)
-    except Exception as e:
-        QMessageBox.critical(parent, "Erreur", f"Impossible de lire {path}\n{e}")
-        return None
-    dialog = QDialog(parent)
-    dialog.setWindowTitle(f"Champ ID pour {layer_type}")
-    layout = QVBoxLayout()
-    combo = QComboBox()
-    combo.addItems(list(gdf.columns))
-    layout.addWidget(QLabel(f"Champ contenant le code {id_name} :"))
-    layout.addWidget(combo)
-    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    btns.accepted.connect(dialog.accept)
-    btns.rejected.connect(dialog.reject)
-    layout.addWidget(btns)
-    dialog.setLayout(layout)
-    if dialog.exec_() != QDialog.Accepted:
-        return None
-    field = combo.currentText()
-    settings.setValue(layer_type + "_path", path)
-    settings.setValue(layer_type + "_field", field)
-    gdf = gdf.rename(columns={field: id_name})
-    log(f"Fond {layer_type} mémorisé → champ = {field}")
-    return gdf[[id_name, 'geometry']]
 
-# ------------------------------------------------------------------
+# ===========================================================================
+# FONCTION PRINCIPALE
+# ===========================================================================
 def process_geo(filtered_data_dir, parent=None):
+    """
+    Point d'entrée principal.
+    Charge les fonds géographiques uniquement en mémoire (pas dans le projet)
+    puis réalise les jointures.
+    """
+    # ------------------------------------------------------------------
+    # 1. Récupération de la liste des CSV
+    # ------------------------------------------------------------------
     csv_files = [f for f in os.listdir(filtered_data_dir) if f.endswith(".csv")]
     if not csv_files:
         warning(parent, "Aucun fichier", "Aucun CSV filtré trouvé.")
         return False
+
     selected_csv = select_types_to_process(csv_files, parent)
     if not selected_csv:
         return False
-    progress = QProgressDialog("Création des couches...", "Annuler", 0, len(selected_csv), parent)
+
+    # ------------------------------------------------------------------
+    # 2. Barre de progression
+    # ------------------------------------------------------------------
+    progress = QProgressDialog(
+        "Création des couches...", "Annuler", 0, len(selected_csv), parent
+    )
     progress.setWindowTitle("Mes Élus")
-    needs_communes = any("maires" in f or "conseillers-municipaux" in f for f in selected_csv)
-    needs_epci     = any("conseillers-communautaires" in f for f in selected_csv)
-    needs_cantons  = any("conseillers-departementaux" in f for f in selected_csv)
-    needs_circo    = any("deputes" in f for f in selected_csv)
-    needs_depts    = any(x in " ".join(selected_csv) for x in ["senateurs", "conseillers-departementaux"])
-    needs_regions  = "conseillers-regionaux" in " ".join(selected_csv)
-    communes_gdf = load_fond("communes", "DEPCOM", parent) if needs_communes else None
-    epci_gdf     = load_fond("epci", "SIREN_EPCI", parent) if needs_epci else None
-    cantons_gdf  = load_fond("cantons", "CODE_CANTON", parent) if needs_cantons else None
-    circo_gdf    = load_fond("circonscriptions", "CODE_CIRCO", parent) if needs_circo else None
-    depts_gdf    = load_fond("departements", "DEP", parent) if needs_depts else None
-    regions_gdf  = load_fond("regions", "REG", parent) if needs_regions else None
+
+    # ------------------------------------------------------------------
+    # 3. Chargement des fonds géographiques UNIQUEMENT EN MÉMOIRE
+    #    (ils ne sont PAS ajoutés au projet QGIS)
+    # ------------------------------------------------------------------
+    geom_paths = get_geom_paths()
+    fonds_charges = {}
+
+    if not geom_paths:
+        warning(parent, "Aucun fond défini",
+                "Aucun chemin de couche géométrique n'est enregistré.\n"
+                "Va dans l'onglet de gestion des chemins et définis-les d'abord.")
+        return False
+
+    for layer_type, data in geom_paths.items():
+        path = data["path"]
+        field = data["field"]
+
+        if not os.path.exists(path):
+            warning(parent, f"Fichier introuvable – {layer_type}",
+                    f"Le fichier suivant n'existe pas :\n{path}")
+            continue
+
+        try:
+            gdf = gpd.read_file(path)
+
+            # Standardisation du nom du champ identifiant
+            id_name = {
+                "communes": "DEPCOM",
+                "epci": "SIREN_EPCI",
+                "cantons": "CODE_CANTON",
+                "circonscriptions": "CODE_CIRCO",
+                "departements": "DEP",
+                "regions": "REG"
+            }.get(layer_type, field)
+
+            gdf = gdf.rename(columns={field: id_name})
+            gdf = gdf[[id_name, "geometry"]].copy()
+            fonds_charges[layer_type] = gdf
+
+        except Exception as e:
+            warning(parent, f"Erreur de chargement – {layer_type}",
+                    f"Impossible de lire le fichier :\n{path}\n\n{e}")
+
+    # Affectation aux variables utilisées ensuite
+    communes_gdf = fonds_charges.get("communes")
+    epci_gdf     = fonds_charges.get("epci")
+    cantons_gdf  = fonds_charges.get("cantons")
+    circo_gdf    = fonds_charges.get("circonscriptions")
+    depts_gdf    = fonds_charges.get("departements")
+    regions_gdf  = fonds_charges.get("regions")
+
     layers_added = []
+
+    # ------------------------------------------------------------------
+    # 4. Traitement de chaque fichier CSV sélectionné
+    # ------------------------------------------------------------------
     for i, csv_file in enumerate(selected_csv):
         progress.setValue(i)
         progress.setLabelText(csv_file)
+
         if progress.wasCanceled():
             break
+
         path = os.path.join(filtered_data_dir, csv_file)
-        log(f"\nTraitement : {csv_file}")
+
         # Lecture intelligente du séparateur
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 snippet = f.read(2048)
             sep = ',' if snippet.count(',') > snippet.count(';') else ';'
             df = pd.read_csv(path, sep=sep, encoding="utf-8", low_memory=False, dtype=str)
-            log(f"   CSV lu → séparateur '{sep}' | {len(df)} lignes")
         except Exception as e:
-            log(f"   ERREUR lecture CSV : {e}")
+            warning(parent, "Erreur de lecture", f"Impossible de lire {csv_file}\n{e}")
             continue
+
         gdf = None
         layer_name = None
         group_var = None
+        geo_cols = []
+        elus_cols = []
         fn = csv_file.lower()
-        # 1. CONSEILLERS COMMUNAUTAIRES
-        if "conseillers-communautaires" in fn and epci_gdf is not None:
+
+        # ==============================================================
+        # 4.1 CONSEILLERS COMMUNAUTAIRES
+        # ==============================================================
+        if ("conseiller-communautaire" in fn or "conseillers-communautaires" in fn) and epci_gdf is not None:
             if 'N° SIREN' in df.columns:
                 df['SIREN_EPCI'] = df['N° SIREN'].str.zfill(9)
-                gdf = gpd.GeoDataFrame(df.merge(epci_gdf, on='SIREN_EPCI', how='left'), crs=epci_gdf.crs)
-                log(f"   Jointure EPCI → {gdf['geometry'].notna().sum()}/{len(df)}")
+                gdf = gpd.GeoDataFrame(
+                    df.merge(epci_gdf, on='SIREN_EPCI', how='left'),
+                    crs=epci_gdf.crs
+                )
                 layer_name = "Conseillers communautaires"
                 group_var = "SIREN_EPCI"
-                geo_cols = ["Code du département", "Libellé du département", "N° SIREN", "Libellé de l'EPCI","SIREN_EPCI", "Libellé.EPCI"]
-                elus_cols = [c for c in df.columns if c not in geo_cols + ["geometry"]]
-            # === Couche spéciale : Présidents des EPCI (couche unique avec plusieurs features) ===
-            if epci_gdf is not None:
-                pres_rows = df[df['Libellé de la fonction'].str.contains("Président du conseil communautaire", case=True, na=False)]
-                if not pres_rows.empty:
-                    vl = QgsVectorLayer("Polygon?crs=epsg:2154", "Président EPCI", "memory")
-                    pr = vl.dataProvider()
-                    pr.addAttributes([QgsField(n, QVariant.String) for n in pres_rows.columns if n != 'geometry'])
-                    vl.updateFields()
-                    feats = []
-                    for _, pres in pres_rows.iterrows():
-                        siren_epci = str(pres['N° SIREN']).zfill(9)
-                        epci_geom_row = epci_gdf[epci_gdf['SIREN_EPCI'] == siren_epci]
-                        if not epci_geom_row.empty:
-                            geom = epci_geom_row.iloc[0].geometry
-                            f = QgsFeature(vl.fields())
-                            for field in pres_rows.columns:
-                                if field != 'geometry':
-                                    f.setAttribute(field, str(pres[field]) if pd.notna(pres[field]) else "")
-                            f.setGeometry(QgsGeometry.fromWkt(geom.wkt))
-                            feats.append(f)
-                    if feats:
-                        pr.addFeatures(feats)
-                        vl.updateExtents()
-                        QgsProject.instance().addMapLayer(vl)
-                        layers_added.append("Président EPCI")
-                        log(f"COUCHE CRÉÉE : Président EPCI → {len(feats)} entités")
-                        info(parent, "Succès", f"Présidents EPCI : {len(feats)} entités ajoutées")
-            
-        # 2. MAIRES & CONSEILLERS MUNICIPAUX
-        elif ("maires" in fn or "conseillers-municipaux" in fn) and communes_gdf is not None:
+                geo_cols = ["SIREN_EPCI", "Code du département", "Libellé du département",
+                            "N° SIREN", "Libellé de l'EPCI"]
+                elus_cols = [c for c in df.columns if c not in geo_cols]
+
+        # ==============================================================
+        # 4.2 MAIRES & CONSEILLERS MUNICIPAUX
+        # ==============================================================
+        elif ("maire" in fn or "conseiller-municipal" in fn or "conseillers-municipaux" in fn) and communes_gdf is not None:
             if 'Code de la commune' in df.columns:
                 df['DEPCOM'] = df['Code de la commune'].str.zfill(5)
-                gdf = gpd.GeoDataFrame(df.merge(communes_gdf, on='DEPCOM', how='left'), crs=communes_gdf.crs)
-                log(f"   Jointure COMMUNES → {gdf['geometry'].notna().sum()}/{len(df)}")
-                layer_name = "Maires" if "maires" in fn else "Conseillers municipaux"
+                gdf = gpd.GeoDataFrame(
+                    df.merge(communes_gdf, on='DEPCOM', how='left'),
+                    crs=communes_gdf.crs
+                )
+                layer_name = "Maires" if "maire" in fn else "Conseillers municipaux"
                 group_var = "DEPCOM"
-                geo_cols = ["DEPCOM", "Code du département", "Libellé du département", "Code de la commune", "Libellé de la commune"]
-                elus_cols = [c for c in df.columns if c not in geo_cols + ["geometry"]]
-        # 3. CONSEILLERS DÉPARTEMENTAUX + PRÉSIDENT (double traitement)
-        elif "conseillers-departementaux" in fn:
-            # === 1. Couche normale : tous les conseillers départementaux (cantons) ===
-            if cantons_gdf is not None and 'Code du canton' in df.columns:
-                df_temp = df.copy()
-                df_temp['merge_key'] = df_temp['Code du canton'].str.zfill(4)
-                key_col = next((c for c in cantons_gdf.columns if c.upper() in ["CODE_CANTON", "CODE_NS", "ID", "CODE"]), None)
-                if key_col:
-                    cantons_gdf['merge_key'] = cantons_gdf[key_col].astype(str).str.zfill(4)
-                    gdf = gpd.GeoDataFrame(df_temp.merge(cantons_gdf[['merge_key', 'geometry']], on='merge_key', how='left'), crs=cantons_gdf.crs)
-                    log(f"   Jointure conseillers départementaux → {gdf['geometry'].notna().sum()}/{len(df_temp)}")
-                    layer_name = "Conseillers départementaux"
-                    group_var = "merge_key"
-                    geo_cols = ["merge_key", "Code du département", "Libellé du département", "Code du canton","Libellé du canton"]
-                    elus_cols = [c for c in df.columns if c not in geo_cols + ["geometry"]]
-            # === 2. Couche spéciale : Présidents des conseils départementaux de la région ===
-            if depts_gdf is not None and regions_gdf is not None:
-                # Filtrer les présidents de conseils départementaux
-                presidents_dept = df[
-                    df['Libellé de la fonction'].str.contains('Président du conseil départemental', case=True, na=False)
-                ]
-                if not presidents_dept.empty:
-                    vl = QgsVectorLayer("Polygon?crs=epsg:2154", "Présidents des conseils départementaux", "memory")
-                    pr = vl.dataProvider()
-                    # Ajouter les champs nécessaires
-                    fields_to_add = [c for c in presidents_dept.columns if c != 'geometry']
-                    pr.addAttributes([QgsField(n, QVariant.String) for n in fields_to_add])
-                    vl.updateFields()
-                    feats = []
-                    for _, pres in presidents_dept.iterrows():
-                        dep_code = str(pres['Code du département']).zfill(2)
-                        dept_geom = depts_gdf[depts_gdf['DEP'] == dep_code]
-                        if not dept_geom.empty:
-                            f = QgsFeature(vl.fields())
-                            for field in fields_to_add:
-                                f.setAttribute(field, str(pres[field]) if pd.notna(pres[field]) else "")
-                            f.setGeometry(QgsGeometry.fromWkt(dept_geom.iloc[0].geometry.wkt))
-                            feats.append(f)
-                    if feats:
-                        pr.addFeatures(feats)
-                        vl.updateExtents()
-                        QgsProject.instance().addMapLayer(vl)
-                        layers_added.append("Président du conseil départemental")
-                        log(f"COUCHE CRÉÉE : Président du conseil départemental → {len(feats)} entités")
-                        info(parent, "Succès", f"Présidents de départements : {len(feats)} entités ajoutées")
+                geo_cols = ["DEPCOM", "Code du département", "Libellé du département",
+                            "Code de la commune", "Libellé de la commune"]
+                elus_cols = [c for c in df.columns if c not in geo_cols]
 
-        # 4. DÉPUTÉS
-        elif "deputes" in fn and circo_gdf is not None:
-            col = next((c for c in df.columns if "circonscription législative" in c.lower()), None)
-            if col:
-                df['merge_key'] = df[col].astype(str).str.zfill(6).str[-4:]
-                key_col = next((c for c in circo_gdf.columns if c.upper() in ["CODE_CIRCO", "CIRCO", "CODE", "ID"]), None)
-                if key_col:
-                    circo_gdf['merge_key'] = circo_gdf[key_col].astype(str).str.zfill(6).str[-4:]
-                    gdf = gpd.GeoDataFrame(df.merge(circo_gdf[['merge_key', 'geometry']], on='merge_key', how='left'), crs=circo_gdf.crs)
-                    log(f"   Jointure députés → {gdf['geometry'].notna().sum()}/{len(df)}")
+        # ==============================================================
+        # 4.3 CONSEILLERS DÉPARTEMENTAUX
+        # ==============================================================
+        elif ("conseiller-departemental" in fn or "conseillers-departementaux" in fn) and cantons_gdf is not None:
+            if 'Code du canton' in df.columns:
+                df['CODE_CANTON'] = df['Code du canton'].str.zfill(4)
+                gdf = gpd.GeoDataFrame(
+                    df.merge(cantons_gdf, on='CODE_CANTON', how='left'),
+                    crs=cantons_gdf.crs
+                )
+                layer_name = "Conseillers départementaux"
+                group_var = "CODE_CANTON"
+                geo_cols = ["CODE_CANTON", "Code du département", "Libellé du département",
+                            "Code du canton", "Libellé du canton"]
+                elus_cols = [c for c in df.columns if c not in geo_cols]
+
+        # ==============================================================
+        # 4.4 DÉPUTÉS
+        # ==============================================================
+        elif ("depute" in fn or "deputes" in fn) and circo_gdf is not None:
+
+            # Recherche flexible de la colonne circonscription
+            col_circo = None
+            for c in df.columns:
+                c_low = c.lower()
+                if "circonscription" in c_low or "circo" in c_low or "legislativ" in c_low:
+                    col_circo = c
+                    break
+
+            if col_circo is None:
+                warning(parent, "Colonne manquante",
+                        f"Aucune colonne de circonscription trouvée dans {csv_file}.")
+            else:
+                df = df.copy()
+                df['merge_key'] = (
+                    df[col_circo]
+                    .astype(str)
+                    .str.replace(r"\D", "", regex=True)
+                    .str.zfill(4)
+                    .str[-4:]
+                )
+
+                circo_temp = circo_gdf.copy()
+                id_col = [c for c in circo_temp.columns if c != "geometry"][0]
+                circo_temp['merge_key'] = (
+                    circo_temp[id_col]
+                    .astype(str)
+                    .str.replace(r"\D", "", regex=True)
+                    .str.zfill(4)
+                    .str[-4:]
+                )
+
+                gdf = gpd.GeoDataFrame(
+                    df.merge(circo_temp[['merge_key', 'geometry']], on='merge_key', how='left'),
+                    crs=circo_temp.crs
+                )
+
+                if gdf['geometry'].notna().sum() > 0:
                     layer_name = "Députés"
                     group_var = "merge_key"
-                    geo_cols = ["merge_key", "Code du département", "Libellé du département"]
-                    elus_cols = [c for c in df.columns if c not in geo_cols + ["geometry"]]
-        # 5. SÉNATEURS
-        elif "senateurs" in fn and depts_gdf is not None:
+                    geo_cols = ["merge_key"]
+                    elus_cols = [c for c in df.columns if c not in geo_cols]
+
+        # ==============================================================
+        # 4.5 SÉNATEURS
+        # ==============================================================
+        elif ("senateur" in fn or "senateurs" in fn) and depts_gdf is not None:
             col = next((c for c in df.columns if "départ" in c.lower() and "code" in c.lower()), None)
             if col:
                 df['DEP'] = df[col].str.zfill(2)
-                key_col = next((c for c in depts_gdf.columns if c.lower() in ["code", "dep", "insee", "code_ns"]), None)
-                if key_col:
-                    depts_gdf['DEP'] = depts_gdf[key_col].str.zfill(2)
-                    gdf = gpd.GeoDataFrame(df.merge(depts_gdf[['DEP', 'geometry']], on='DEP', how='left'), crs=depts_gdf.crs)
-                    log(f"   Jointure sénateurs → {gdf['geometry'].notna().sum()}/{len(df)}")
-                    layer_name = "Sénateurs"
-                    group_var = "DEP"
-                    geo_cols = ["DEP", "Code du département","Libellé du département"]
-                    elus_cols = [c for c in df.columns if c not in geo_cols + ["geometry"]]
-        # 6. CONSEILLERS RÉGIONAUX + PRÉSIDENT (double traitement)
-        elif "conseillers-regionaux" in fn:
-            # === 1. Couche principale : conseillers régionaux par section départementale ===
-            if depts_gdf is not None and 'Code de la section départementale' in df.columns:
-                df_temp = df.copy()
-                df_temp['merge_key'] = df_temp['Code de la section départementale'].str.zfill(2)
-                key_col = next((c for c in depts_gdf.columns if c.lower() in ["code", "dep", "insee", "code_ns"]), None)
-                if key_col:
-                    depts_gdf['merge_key'] = depts_gdf[key_col].astype(str).str.zfill(2)
-                    gdf = gpd.GeoDataFrame(df_temp.merge(depts_gdf[['merge_key', 'geometry']], on='merge_key', how='left'), crs=depts_gdf.crs)
-                    log(f" Jointure conseillers régionaux (départements) → {gdf['geometry'].notna().sum()}/{len(df_temp)}")
-                    layer_name = "Conseillers régionaux"
-                    group_var = "merge_key"
-                    geo_cols = ["merge_key", "Code de la région", "Libellé de la région",
-                               "Code de la section départementale", "Libellé du département"]
-                    elus_cols = [c for c in df.columns if c not in geo_cols + ["geometry"]]
+                gdf = gpd.GeoDataFrame(
+                    df.merge(depts_gdf, on='DEP', how='left'),
+                    crs=depts_gdf.crs
+                )
+                layer_name = "Sénateurs"
+                group_var = "DEP"
+                geo_cols = ["DEP", "Code du département", "Libellé du département"]
+                elus_cols = [c for c in df.columns if c not in geo_cols]
 
-            # === 2. Couche spéciale : Président(e) du conseil régional ===
-            # 2. Couche spéciale : Président(e) du conseil régional
-            if regions_gdf is not None:
-                president_row = df[df['Libellé de la fonction'].str.contains('Président', case=True, na=False) &
-                                  df['Libellé de la fonction'].str.contains('conseil régional', case=False, na=False)]
-                if not president_row.empty:
-                    pres = president_row.iloc[0]
-                    reg_code = str(pres['Code de la région']).zfill(2)
-                    reg_geom = regions_gdf[regions_gdf['REG'] == reg_code]
-                    if not reg_geom.empty:
-                        vl = QgsVectorLayer("Polygon?crs=epsg:2154", "Président du Conseil régional", "memory")
-                        pr = vl.dataProvider()
-                        pr.addAttributes([QgsField(n, QVariant.String) for n in pres.index])
-                        vl.updateFields()
-                        f = QgsFeature(vl.fields())
-                        for field in pres.index:
-                            f.setAttribute(field, str(pres[field]) if pd.notna(pres[field]) else "")
-                        f.setGeometry(QgsGeometry.fromWkt(reg_geom.iloc[0].geometry.wkt))
-                        pr.addFeature(f)
-                        vl.updateExtents()
-                        QgsProject.instance().addMapLayer(vl)
-                        layers_added.append("Président du Conseil régional")
-                        log("COUCHE CRÉÉE : Président du Conseil régional")
-                        info(parent, "Succès", f"Président de région : {pres['Nom de l\'élu']} {pres['Prénom de l\'élu']}")
-                        
-        # CRÉATION DE LA COUCHE
+        # ==============================================================
+        # 4.6 CONSEILLERS RÉGIONAUX
+        # ==============================================================
+        elif ("conseiller-regional" in fn or "conseillers-regionaux" in fn) and depts_gdf is not None:
+            if 'Code de la section départementale' in df.columns:
+                df['DEP'] = df['Code de la section départementale'].str.zfill(2)
+                gdf = gpd.GeoDataFrame(
+                    df.merge(depts_gdf, on='DEP', how='left'),
+                    crs=depts_gdf.crs
+                )
+                layer_name = "Conseillers régionaux"
+                group_var = "DEP"
+                geo_cols = ["DEP", "Code de la région", "Libellé de la région"]
+                elus_cols = [c for c in df.columns if c not in geo_cols]
+
+        # ==============================================================
+        # 5. CRÉATION DE LA COUCHE PRINCIPALE
+        # ==============================================================
         if gdf is not None and gdf['geometry'].notna().any():
             gdf = gdf[gdf['geometry'].notna()].copy()
+
             if group_var:
                 gdf = aggregate_elus(gdf, group_var, geo_cols, elus_cols)
+
             vl = QgsVectorLayer("Polygon?crs=epsg:2154", layer_name, "memory")
             pr = vl.dataProvider()
+
             fields = [QgsField(n, QVariant.String) for n in gdf.columns if n != 'geometry']
             pr.addAttributes(fields)
             vl.updateFields()
+
             feats = []
             for _, row in gdf.iterrows():
                 f = QgsFeature(vl.fields())
@@ -379,14 +390,20 @@ def process_geo(filtered_data_dir, parent=None):
                         f.setAttribute(field, val)
                 f.setGeometry(QgsGeometry.fromWkt(row.geometry.wkt))
                 feats.append(f)
+
             pr.addFeatures(feats)
             vl.updateExtents()
             QgsProject.instance().addMapLayer(vl)
             layers_added.append(layer_name)
-            log(f"COUCHE CRÉÉE : {layer_name} → {len(feats)} entités")
             info(parent, "Succès", f"{layer_name} → {len(feats)} entités")
         else:
-            log(f"ÉCHEC pour {csv_file}")
+            warning(parent, "Échec de jointure",
+                    f"Aucune géométrie valide pour {csv_file}.")
+
+    # ------------------------------------------------------------------
+    # 6. Fin
+    # ------------------------------------------------------------------
     progress.setValue(len(selected_csv))
-    info(parent, "Terminé !", f"{len(layers_added)} couche(s) créée(s)\nLog → {log_path}")
+    info(parent, "Terminé !", f"{len(layers_added)} couche(s) créée(s)")
+
     return True

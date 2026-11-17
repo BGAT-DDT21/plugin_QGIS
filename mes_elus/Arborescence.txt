@@ -1,22 +1,21 @@
 mes_elus/
 │
 ├── __init__.py
-├── metadata.txt
 ├── icon.png
+├── LICENSE
 ├── main_plugin.py
-├── resources.qrc
-├── resources_rc.py
-├── i18n/
-│   └── fr/
-│       └── LC_MESSAGES/
-│           └── mes_elus.qm
+├── metadata.txt
 ├── lib/
-│   ├── download_rne.py
-│   ├── process_rne_geo.py
-│   ├── generate_default_qml.py
+│   ├── __init__.py
 │   ├── apply_styles.py
+│   ├── download_rne.py
+│   ├── export.py
+│   ├── geom_paths.py
+│   ├── process_rne_geo.py
 │   ├── select_perimeter.py
 │   └── utils.py
+├── ressources/
+│   ├── logo.png
 ├── syles/
 │   ├── conseillers-communautaires-epci.qml
 │   ├── conseillers-departementaux-cd.qml
